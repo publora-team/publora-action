@@ -1,0 +1,53 @@
+name: 'Publora'
+description: 'Announce a release on LinkedIn, X, Bluesky and seven more networks. The release notes become the post.'
+author: 'Publora'
+
+branding:
+  icon: 'send'
+  color: 'blue'
+
+inputs:
+  api-key:
+    description: 'Publora API key. Take it from Settings → API keys and store it as a repository secret.'
+    required: true
+  platforms:
+    description: 'Channels to post to: the platform ids from your Publora account, comma separated. Use "all" for every connected channel.'
+    required: true
+  text:
+    description: 'The post. Leave it out on a release event and the release notes are used. Placeholders: {{notes}}, {{release}}, {{tag}}, {{url}}, {{repo}}.'
+    required: false
+    default: ''
+  media-urls:
+    description: 'Public image or video URLs, comma separated. Instagram, TikTok and YouTube reject a post without one.'
+    required: false
+    default: ''
+  schedule-at:
+    description: 'When to publish: an ISO timestamp, or an offset such as +30m, +2h, +1d. Left out, the post goes out immediately.'
+    required: false
+    default: ''
+  draft:
+    description: 'Save the post as a draft in Publora instead of publishing it. Nothing goes out until you open the dashboard.'
+    required: false
+    default: 'false'
+  truncate:
+    description: 'Trim the text to the shortest limit among the chosen networks, keeping the link. Set to false to send it whole and let the network refuse it.'
+    required: false
+    default: 'true'
+  dry-run:
+    description: 'Print the post that would be sent and stop. Nothing reaches Publora, no key needed.'
+    required: false
+    default: 'false'
+
+outputs:
+  post-id:
+    description: 'Id of the created post group.'
+  status:
+    description: 'published, scheduled, draft, or dry-run.'
+  content:
+    description: 'The text actually sent, after placeholders and trimming.'
+  platforms:
+    description: 'The channels the post was sent to, comma separated.'
+
+runs:
+  using: 'node24'
+  main: 'index.js'

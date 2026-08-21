@@ -1,0 +1,25 @@
+name: self-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No key and no network: dry-run only proves the action loads and
+      # composes the post the way the README says it does.
+      - id: post
+        uses: ./
+        with:
+          platforms: linkedin-example, twitter-example
+          text: 'Self-test for {{repo}} — nothing is published.'
+          dry-run: true
+
+      - run: |
+          test "${{ steps.post.outputs.status }}" = "dry-run"
+          echo "composed: ${{ steps.post.outputs.content }}"
