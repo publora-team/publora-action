@@ -1,0 +1,24 @@
+name: live-test
+
+# Manual only. Posts to publora-playground: Publora acknowledges the request
+# and discards it, so nothing reaches a real network.
+on:
+  workflow_dispatch:
+
+jobs:
+  playground:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: post
+        uses: ./
+        with:
+          api-key: ${{ secrets.PUBLORA_API_KEY }}
+          platforms: publora-playground
+          text: 'Live check from {{repo}} — the playground target discards this.'
+
+      - run: |
+          echo "status:    ${{ steps.post.outputs.status }}"
+          echo "channels:  ${{ steps.post.outputs.platforms }}"
+          test "${{ steps.post.outputs.status }}" = "published"
