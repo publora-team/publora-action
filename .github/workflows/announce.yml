@@ -1,0 +1,18 @@
+name: announce
+
+# The action announcing its own releases. Kept on draft: true so a release never
+# posts by itself — the text lands in Publora and a human decides. Drop that line
+# to publish straight away.
+on:
+  release:
+    types: [published]
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: publora-team/publora-action@v1
+        with:
+          api-key: ${{ secrets.PUBLORA_API_KEY }}
+          platforms: all
+          draft: true
