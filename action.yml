@@ -1,5 +1,5 @@
 name: 'Publora'
-description: 'Announce a release on LinkedIn, X, Bluesky and seven more networks. The release notes become the post.'
+description: 'Announce a release on LinkedIn, X, Bluesky and more. The release notes become the post.'
 author: 'Publora'
 
 branding:
@@ -8,21 +8,21 @@ branding:
 
 inputs:
   api-key:
-    description: 'Publora API key. Take it from Settings → API keys and store it as a repository secret.'
+    description: 'Publora API key. Take it from the API page of the Publora dashboard and store it as a repository secret.'
     required: true
   platforms:
-    description: 'Channels to post to: the platform ids from your Publora account, comma separated. Use "all" for every connected channel.'
+    description: 'Channels to post to: the platform ids from your Publora account, comma separated. Use "all" for every connected channel that can take the post; the others are named in the log and left out.'
     required: true
   text:
     description: 'The post. Leave it out on a release event and the release notes are used. Placeholders: {{notes}}, {{release}}, {{tag}}, {{url}}, {{repo}}.'
     required: false
     default: ''
   media-urls:
-    description: 'Public image or video URLs, comma separated. Instagram, TikTok and YouTube reject a post without one.'
+    description: 'Public image or video URLs, comma separated. Instagram needs one; YouTube needs a video.'
     required: false
     default: ''
   schedule-at:
-    description: 'When to publish: an ISO timestamp, or an offset such as +30m, +2h, +1d. Left out, the post goes out immediately.'
+    description: 'When to publish: an ISO timestamp (with a time zone, e.g. 2026-10-15T10:00:00+04:00), or an offset such as +30m, +2h, +1d. Left out, and with draft off, the post is published right away.'
     required: false
     default: ''
   draft:
@@ -30,7 +30,7 @@ inputs:
     required: false
     default: 'false'
   truncate:
-    description: 'Trim the text to the shortest limit among the chosen networks, keeping the link. Set to false to send it whole and let the network refuse it.'
+    description: 'Fit the text to each network, keeping the link: X and Threads get the whole post as a thread, every other network gets it cut to its own limit. Set to false to send the same text everywhere.'
     required: false
     default: 'true'
   dry-run:
@@ -40,9 +40,11 @@ inputs:
 
 outputs:
   post-id:
-    description: 'Id of the created post group.'
+    description: 'Id of the first post group created.'
+  post-ids:
+    description: 'Ids of every post group created, comma separated. Networks with different text limits get separate posts.'
   status:
-    description: 'published, scheduled, draft, or dry-run.'
+    description: 'published, scheduled, draft, failed, or dry-run.'
   content:
     description: 'The text actually sent, after placeholders and trimming.'
   platforms:

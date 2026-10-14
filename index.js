@@ -11,9 +11,28 @@
 const fs = require('fs');
 
 const API = 'https://api.publora.com/api/v1';
+const VERSION = '1.1.0';
 
 /** Networks that refuse a post without an image or a video. */
 const MEDIA_REQUIRED = ['instagram', 'tiktok', 'youtube'];
+
+/** Networks that take only video. */
+const VIDEO_REQUIRED = ['youtube'];
+
+/** Whether a media URL points at a video, judged by its extension. */
+function isVideo(url) {
+  return /\.(mp4|mov|webm|m4v)(\?|#|$)/i.test(url);
+}
+
+/** Networks where Publora splits a long post into a thread, so nothing is trimmed. */
+const THREADED = ['twitter', 'threads'];
+
+/**
+ * Networks the action does not post to. TikTok wants the person to choose who
+ * can see each post, which a workflow can't do; Pinterest can be connected in
+ * Publora but not published to.
+ */
+const UNSUPPORTED = { tiktok: 'TikTok asks a person to choose who can see each post', pinterest: 'Publora cannot publish to Pinterest' };
 
 /** Longest post each network accepts. Used to trim, never to pad. */
 const LIMIT = {
@@ -130,25 +149,50 @@ function compose(template, data) {
 }
 
 /**
+ * Length the way Publora counts it: one per code point, two for an emoji.
+ * Counting the same way keeps a trimmed post from being refused at the limit.
+ */
+function measure(text) {
+  let count = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) || 0;
+    const emoji = code > 0xffff || (/\p{Emoji}/u.test(char) && !/^[\x00-\x7F]$/.test(char));
+    count += emoji ? 2 : 1;
+  }
+  return count;
+}
+
+/** The first `size` code points of a string, so an emoji is never cut in half. */
+function head(text, size) {
+  return Array.from(text).slice(0, Math.max(size, 0)).join('');
+}
+
+/**
  * Trimming is done here rather than left to the network, so the link survives.
  * The cut lands on a word, and the URL is always kept on its own line.
  */
 function trim(text, limit) {
-  if (text.length <= limit) return text;
+  if (measure(text) <= limit) return text;
 
   const lines = text.split('\n');
   const tail = /^https?:\/\/\S+$/.test(lines[lines.length - 1]) ? lines.pop() : '';
-  const room = limit - (tail ? tail.length + 2 : 0) - 1;
-  let body = lines.join('\n').slice(0, Math.max(room, 0));
+  const all = lines.join('\n');
+  const join = (body) => [body.trim() + '\u2026', tail].filter(Boolean).join('\n\n');
+
+  let room = limit - (tail ? measure(tail) + 2 : 0) - 1;
+  let body = head(all, room);
+  // Emoji count double, so a cut by code points can still be over; shave until it fits.
+  while (body && measure(join(body)) > limit) body = head(body, Array.from(body).length - 1);
 
   // Prefer to stop at the end of a bullet rather than halfway through one;
   // fall back to a word boundary when the last line break is too far up.
+  room = body.length;
   const lastLine = body.lastIndexOf('\n');
   const lastSpace = body.lastIndexOf(' ');
   const cut = lastLine > room * 0.5 ? lastLine : lastSpace > room * 0.6 ? lastSpace : -1;
   if (cut > 0) body = body.slice(0, cut);
 
-  return [body.trim() + '\u2026', tail].filter(Boolean).join('\n\n');
+  return join(body);
 }
 
 /* ------------------------------- the API ------------------------------- */
@@ -157,7 +201,7 @@ async function call(path, key, body) {
   const response = await fetch(API + path, {
     method: body ? 'POST' : 'GET',
     headers: Object.assign(
-      { 'x-publora-key': key, 'User-Agent': 'publora-action/1.0.0' },
+      { 'x-publora-key': key, 'User-Agent': 'publora-action/' + VERSION },
       body ? { 'Content-Type': 'application/json' } : {},
     ),
     body: body ? JSON.stringify(body) : undefined,
@@ -166,7 +210,7 @@ async function call(path, key, body) {
   const raw = await response.text();
 
   if (response.status === 401) {
-    fail('Publora refused the key. Check the api-key secret; the key is the one from Settings → API keys.');
+    fail('Publora refused the key. Check the api-key secret; the key comes from the API page of the Publora dashboard.');
   }
   if (response.status === 429) {
     fail('Publora rate limit reached. The workflow can retry in a minute.');
@@ -175,9 +219,10 @@ async function call(path, key, body) {
     let detail = raw.slice(0, 400);
     try {
       const parsed = JSON.parse(raw);
-      detail = parsed.error || parsed.message || detail;
+      const reasons = ((parsed.validation && parsed.validation.errors) || []).map((e) => e && e.message).filter(Boolean);
+      detail = reasons.length ? reasons.join(' ') : parsed.error || parsed.message || detail;
     } catch {}
-    fail(`Publora answered ${response.status}: ${detail}`);
+    throw new Error(`Publora answered ${response.status}: ${detail}`);
   }
 
   try {
@@ -224,11 +269,12 @@ async function main() {
     fail('Nothing to post: this run carries no release, and no text was given. Add a text input, or run the action on a release event.');
   }
 
-  const text0 = compose(input('text'), data).trim();
-  let text = text0;
+  const text = compose(input('text'), data).trim();
   if (!text) fail('The post came out empty. Check the text input.');
 
-  // "all" is resolved against the account, so the workflow file does not carry ids.
+  // "all" is resolved against the account, so the workflow file does not carry
+  // ids. It means every channel this post can actually go to: the rest are
+  // named in the log and left out, so one channel can't sink the whole run.
   let platforms = list(input('platforms'));
   if (platforms.length === 1 && platforms[0].toLowerCase() === 'all') {
     if (dryRun) {
@@ -236,8 +282,26 @@ async function main() {
     } else {
       const connections = await call('/platform-connections', key);
       const rows = Array.isArray(connections) ? connections : connections.connections || connections.data || [];
-      platforms = rows.map((row) => row.platformId || row.id).filter(Boolean);
-      if (!platforms.length) fail('No connected channels in this Publora account. Connect one in the dashboard first.');
+      const skipped = [];
+      platforms = [];
+      for (const row of rows) {
+        const id = row.platformId || row.id;
+        if (!id) continue;
+        const network = networkOf(id);
+        const why = UNSUPPORTED[network]
+          || (row.tokenStatus && row.tokenStatus !== 'valid' ? 'needs reconnecting in Publora' : '')
+          || (MEDIA_REQUIRED.includes(network) && !media.length ? 'needs an image or a video' : '')
+          || (VIDEO_REQUIRED.includes(network) && !media.some(isVideo) ? 'takes only video' : '');
+        if (why) skipped.push(`${id} (${why})`);
+        else platforms.push(id);
+      }
+      if (skipped.length) say('Left out: ' + skipped.join(', ') + '.');
+      if (!platforms.length) fail('No connected channel can take this post. Connect one in the Publora dashboard, or pass media-urls.');
+    }
+  } else {
+    const unsupported = platforms.filter((id) => UNSUPPORTED[networkOf(id)]);
+    if (unsupported.length) {
+      fail(unsupported.map((id) => `${id}: ${UNSUPPORTED[networkOf(id)]}, so the action does not post there.`).join(' ') + ' Remove it from platforms.');
     }
   }
   if (!platforms.length) fail('platforms is empty. List the channel ids, or use "all".');
@@ -246,48 +310,79 @@ async function main() {
   if (missingMedia.length && !media.length) {
     fail(`These channels need an image or a video: ${missingMedia.join(', ')}. Pass media-urls, or leave them out.`);
   }
+  const missingVideo = platforms.filter((id) => VIDEO_REQUIRED.includes(networkOf(id)));
+  if (missingVideo.length && media.length && !media.some(isVideo)) {
+    fail(`These channels take only video: ${missingVideo.join(', ')}. Pass a video in media-urls, or leave them out.`);
+  }
 
-  if (flag('truncate')) {
-    const limits = platforms.map((id) => LIMIT[networkOf(id)]).filter(Boolean);
-    const limit = limits.length ? Math.min(...limits) : 0;
-    if (limit && text.length > limit) {
-      say(`Trimmed the post from ${text.length} to ${limit} characters — the shortest limit among the chosen channels.`);
-      text = trim(text, limit);
+  // One text per limit: X and Threads take the whole post and Publora threads
+  // it, every other network gets the post cut to its own length. Channels that
+  // end up with the same text travel in one request.
+  const batches = [];
+  for (const id of platforms) {
+    const network = networkOf(id);
+    const limit = flag('truncate') && !THREADED.includes(network) ? LIMIT[network] || 0 : 0;
+    const content = limit && measure(text) > limit ? trim(text, limit) : text;
+    const batch = batches.find((b) => b.content === content);
+    if (batch) batch.platforms.push(id);
+    else batches.push({ content, platforms: [id] });
+  }
+  for (const batch of batches) {
+    if (batch.content !== text) {
+      say(`Trimmed to ${measure(batch.content)} characters for ${batch.platforms.join(', ')}.`);
     }
   }
 
-  const scheduledTime = draft ? null : when(input('schedule-at')) || new Date().toISOString();
+  const scheduled = draft ? null : when(input('schedule-at'));
+  const publishNow = !draft && !scheduled;
+  const status = draft ? 'draft' : scheduled ? 'scheduled' : 'published';
 
   if (dryRun) {
-    console.log('--- the post that would be sent ---');
-    console.log(text);
-    console.log('-----------------------------------');
-    console.log('channels: ' + platforms.join(', '));
-    console.log('timing:   ' + (draft ? 'saved as a draft' : scheduledTime));
+    for (const batch of batches) {
+      console.log('--- the post that would be sent ---');
+      console.log(batch.content);
+      console.log('-----------------------------------');
+      console.log('channels: ' + batch.platforms.join(', '));
+    }
+    console.log('timing:   ' + (draft ? 'saved as a draft' : scheduled || 'published right away'));
     if (media.length) console.log('media:    ' + media.join(', '));
 
     output('status', 'dry-run');
-    output('content', text);
+    output('content', batches[0].content);
     output('platforms', platforms.join(','));
     return;
   }
 
-  const result = await call('/create-post', key, Object.assign(
-    { content: text, platforms },
-    // A post without a scheduled time is a draft — that is the whole switch.
-    scheduledTime ? { scheduledTime } : {},
-    media.length ? { mediaUrls: media } : {},
-  ));
+  const ids = [];
+  const errors = [];
+  let posted = 0;
+  for (const batch of batches) {
+    try {
+      const result = await call('/create-post', key, Object.assign(
+        { content: batch.content, platforms: batch.platforms },
+        // No time is a draft; publishNow asks Publora to publish on its own clock.
+        scheduled ? { scheduledTime: scheduled } : {},
+        publishNow ? { publishNow: true } : {},
+        media.length ? { mediaUrls: media } : {},
+      ));
+      ids.push(result.postGroupId || result.id || '');
+      posted += batch.platforms.length;
+    } catch (error) {
+      errors.push(`${batch.platforms.join(', ')}: ${error.message}`);
+    }
+  }
 
-  const id = result.postGroupId || result.id || '';
-  const status = draft ? 'draft' : when(input('schedule-at')) ? 'scheduled' : 'published';
-
-  output('post-id', id);
-  output('status', status);
-  output('content', text);
+  output('post-id', ids[0] || '');
+  output('post-ids', ids.filter(Boolean).join(','));
+  output('status', ids.length ? status : 'failed');
+  output('content', batches[0].content);
   output('platforms', platforms.join(','));
 
-  say(`Publora: ${status} on ${platforms.length} channel(s).${id ? ' Post ' + id + '.' : ''}`);
+  if (ids.length) {
+    const named = ids.filter(Boolean);
+    say(`Publora: ${status} on ${posted} channel(s).${named.length ? ' Post ' + named.join(', ') + '.' : ''}`);
+  }
+  if (errors.length) fail((ids.length ? 'Some channels were not posted to. ' : '') + errors.join(' '));
 }
 
 main().catch((error) => fail(error && error.message ? error.message : String(error)));
